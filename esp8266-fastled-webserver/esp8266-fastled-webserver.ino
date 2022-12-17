@@ -16,7 +16,74 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <string>
+#include <deque>
+
 #include "common.h"
+#include "espnow.h"
+
+uint8_t ESP_NOW_MAC[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+const uint16_t left_start = 0;
+const uint16_t left_end = 56;
+
+const uint16_t right_start = 58;
+const uint16_t right_end = 98;
+
+struct esp_now_message_t
+{
+    std::string content;
+    std::string type;
+    uint16_t id;
+};
+
+const uint16_t anhaenger_id = 2;
+
+bool blockAnimation;
+
+enum class Blinker : uint8_t {
+  BLINK_OFF,
+  BLINK_LEFT,
+  BLINK_RIGHT,
+  BLINK_BOTH
+} blinker;
+
+bool brakeLight = false;
+
+std::deque<esp_now_message_t> message_queue{};
+std::string buffer;
+
+void onRecv(uint8_t* mac_addr, uint8_t* data, uint8_t data_len) {
+  const std::string data_str{ (const char*)data, data_len };
+  Serial.printf("received %d bytes: \"%s\"\n", data_len, data_str.c_str());
+
+  size_t sep_pos = data_str.find(":");
+  if (std::string::npos != sep_pos)
+  {
+      const std::string type = std::string{data_str.substr(0, sep_pos)};
+      std::string content = std::string{data_str.substr(sep_pos+1, data_str.length()-sep_pos-1)};
+      uint16_t id = 0;
+
+      size_t sep_pos2 = content.find(":");
+
+      esp_now_message_t msg {
+        .content = std::string::npos != sep_pos2 ? content.substr(0, sep_pos2) : content,
+        .type = type,
+        .id = std::string::npos != sep_pos2 ? id : uint16_t{0},
+      };
+
+      Serial.printf("type: %s, content: %s, id: %d\n", msg.type.c_str(), msg.content.c_str(), msg.id);
+
+      if (msg.id == anhaenger_id || msg.id == 0)
+      {
+        message_queue.push_back(msg);
+      }
+  }
+  else
+  {
+    Serial.printf("could not find 1st \":\" in \"%s\"\n", data_str.c_str());
+  }
+}
 
 WiFiManager wifiManager;
 ESP8266WebServer webServer(80);
@@ -613,6 +680,64 @@ void setup() {
 
   autoPlayTimeout = millis() + (autoplayDuration * 1000);
   timeClient.begin();
+
+  // Init ESP-NOW
+  if (esp_now_init() != 0) {
+    Serial.println("Error initializing ESP-NOW");
+  } else {
+    esp_now_register_recv_cb(onRecv);
+    esp_now_add_peer(ESP_NOW_MAC, ESP_NOW_ROLE_CONTROLLER, 1, NULL, 0);
+  }
+}
+
+void handleESPNOW()
+{
+  if (message_queue.size() > 0)
+  {
+    for (const esp_now_message_t &msg : message_queue)
+    {
+      Serial.printf("{\"type\":\"%s\",\"content\":\"%s\",\"id\":\"%u\"}\r\n", msg.type.c_str(), msg.content.c_str(), msg.id);
+      if (msg.type == "BLINKLEFT")
+      {
+        //led_state.blink_left = 1250;
+        blockAnimation = true;
+        blinker = Blinker::BLINK_LEFT;
+      }
+      else if (msg.type == "BLINKRIGHT")
+      {
+        //led_state.blink_right = 1250;
+        blockAnimation = true;
+        blinker = Blinker::BLINK_RIGHT;
+      }
+      else if (msg.type == "BLINKBOTH")
+      {
+        //led_state.blink_left = 1250;
+        //led_state.blink_right = 1250;
+        blockAnimation = true;
+        blinker = Blinker::BLINK_BOTH;
+      }
+      else if (msg.type == "BLINKOFF")
+      {
+        //led_state.blink_left = 0;
+        //led_state.blink_right = 0;
+        blockAnimation = false;
+        blinker = Blinker::BLINK_OFF;
+      }
+      else if (msg.type == "BRAKELIGHTSON")
+      {
+        //led_state.brake = 1250;
+        blockAnimation = true;
+        brakeLight = true;
+      }
+      else if (msg.type == "BRAKELIGHTSOFF")
+      {
+        //led_state.brake = 0;
+        blockAnimation = false;
+        brakeLight = false;
+      }
+    }
+  }
+  message_queue.erase(std::begin(message_queue), std::end(message_queue));
 }
 
 void sendInt(uint8_t value)
@@ -648,6 +773,8 @@ void loop() {
   // Modify random number generator seed; we use a lot of it.  (Note: this is still deterministic)
   random16_add_entropy(random(65535));
 
+  handleESPNOW();
+
   //  webSocketsServer.loop();
 
   wifiManager.process();
@@ -680,41 +807,72 @@ void loop() {
   checkPingTimer();
   handleIrInput();  // empty function when ENABLE_IR is not defined
 
-  if (power == 0) {
-    fill_solid(leds, NUM_PIXELS, CRGB::Black);
-    FastLED.delay(1000 / FRAMES_PER_SECOND); // this function calls FastLED.show() at least once
-    return;
+  if (!blockAnimation) {
+
+    if (power == 0) {
+      fill_solid(leds, NUM_PIXELS, CRGB::Black);
+      FastLED.delay(1000 / FRAMES_PER_SECOND); // this function calls FastLED.show() at least once
+      return;
+    }
+
+    // EVERY_N_SECONDS(10) {
+    //   Serial.print( F("Heap: ") ); Serial.println(system_get_free_heap_size());
+    // }
+
+    // change to a new cpt-city gradient palette
+    EVERY_N_SECONDS( secondsPerPalette ) {
+      gCurrentPaletteNumber = addmod8( gCurrentPaletteNumber, 1, gGradientPaletteCount);
+      gTargetPalette = gGradientPalettes[ gCurrentPaletteNumber ];
+    }
+
+    EVERY_N_MILLISECONDS(40) {
+      // slowly blend the current palette to the next
+      nblendPaletteTowardPalette( gCurrentPalette, gTargetPalette, 8);
+      gHue++;  // slowly cycle the "base color" through the rainbow
+    }
+
+    if (autoplay && (millis() > autoPlayTimeout)) {
+      adjustPattern(true);
+      autoPlayTimeout = millis() + (autoplayDuration * 1000);
+    }
+
+    // Call the current pattern function once, updating the 'leds' array
+    patterns[currentPatternIndex].pattern();
+
+    #if HAS_COORDINATE_MAP
+    if (showClock) drawAnalogClock();
+    #endif
+
+    // insert a delay to keep the framerate modest ... this is guaranteed to call FastLED.show() at least once
+  } else {
+    if (brakeLight)
+    {
+      fill_solid(leds, NUM_PIXELS, CRGB::Red);
+    }
+    else if (blinker != Blinker::BLINK_OFF)
+    {
+      const auto time = millis();
+      if (time % 750 > 375)
+      {
+        fill_solid(leds, NUM_PIXELS, CRGB::Black);
+      }
+
+      if (blinker == Blinker::BLINK_LEFT || blinker == Blinker::BLINK_BOTH)
+      {
+        std::fill(std::begin(leds)+left_start, std::begin(leds)+left_end, time % 750 < 375 ? CRGB::Yellow : CRGB::Black);
+      }
+
+      if (blinker == Blinker::BLINK_RIGHT || blinker == Blinker::BLINK_BOTH)
+      {
+        std::fill(std::begin(leds)+right_start, std::begin(leds)+right_end, time % 750 < 375 ? CRGB::Yellow : CRGB::Black); 
+      }
+    }
+    else
+    {
+      fill_solid(leds, NUM_PIXELS, CRGB::Black);
+    }
   }
 
-  // EVERY_N_SECONDS(10) {
-  //   Serial.print( F("Heap: ") ); Serial.println(system_get_free_heap_size());
-  // }
-
-  // change to a new cpt-city gradient palette
-  EVERY_N_SECONDS( secondsPerPalette ) {
-    gCurrentPaletteNumber = addmod8( gCurrentPaletteNumber, 1, gGradientPaletteCount);
-    gTargetPalette = gGradientPalettes[ gCurrentPaletteNumber ];
-  }
-
-  EVERY_N_MILLISECONDS(40) {
-    // slowly blend the current palette to the next
-    nblendPaletteTowardPalette( gCurrentPalette, gTargetPalette, 8);
-    gHue++;  // slowly cycle the "base color" through the rainbow
-  }
-
-  if (autoplay && (millis() > autoPlayTimeout)) {
-    adjustPattern(true);
-    autoPlayTimeout = millis() + (autoplayDuration * 1000);
-  }
-
-  // Call the current pattern function once, updating the 'leds' array
-  patterns[currentPatternIndex].pattern();
-
-  #if HAS_COORDINATE_MAP
-  if (showClock) drawAnalogClock();
-  #endif
-
-  // insert a delay to keep the framerate modest ... this is guaranteed to call FastLED.show() at least once
   FastLED.delay(1000 / FRAMES_PER_SECOND);
 }
 
