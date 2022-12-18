@@ -25,10 +25,10 @@
 uint8_t ESP_NOW_MAC[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
 const uint16_t left_start = 0;
-const uint16_t left_end = 56;
+const uint16_t left_end = 57;
 
-const uint16_t right_start = 58;
-const uint16_t right_end = 98;
+const uint16_t right_start = 57;
+const uint16_t right_end = 115;
 
 struct esp_now_message_t
 {
